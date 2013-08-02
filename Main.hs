@@ -16,13 +16,8 @@ import           Text.HTML.TagSoup
 
 import System.IO.Unsafe
 
--- jump to a specific tag following a path of tags
-jumpTos :: [String] -> [Tag String] -> [Tag String]
-jumpTos = flip $ foldl (\ xs s -> dropWhile (~/= s) xs)
-jumpTo s = jumpTos [s]
-
 getToken :: [Tag String] -> String
-getToken xs = fromAttrib "value" $ head $ jumpTo "<input name=t>" xs
+getToken xs = fromAttrib "value" $ head $ dropWhile (~/= "<input name=t>") xs
 
 sameDay :: DTC.UTCTime -> DTC.UTCTime -> Bool
 sameDay d1 d2 =
@@ -38,7 +33,11 @@ data Kramail = Kramail
   ,  date   :: DTC.UTCTime }
 
 instance Show Kramail where
-  show kr = title kr ++ "\nsent to: " ++ target kr ++ " on " ++ show (date kr)
+  show kr =
+    title kr ++
+    "\nsent to: " ++ target kr ++
+    " on " ++ show (date kr) ++
+    "\n\n"
 
 extractDate :: DTC.UTCTime -> String -> DTC.UTCTime
 extractDate tdy str =
@@ -49,6 +48,13 @@ extractDate tdy str =
              replace "Hier"        (fmt $ rel (-1)) $
              replace "Avant-Hier"  (fmt $ rel (-2)) str
   in readTime loc "%Y/%d/%m (%R)" $ "2013/" ++ str'
+
+extractNumPages :: [Tag String] -> Int
+extractNumPages =
+  read . fromTagText . head . filter isTagText .
+  last . sections (~== "<a>") .
+  takeWhile (~/= "<select>") .
+  dropWhile (~/= "<tr class=forum-c3>")
 
 extractKramails :: DTC.UTCTime -> [Tag String] -> [Kramail]
 extractKramails tdy xs =
@@ -69,49 +75,58 @@ extractKramail tdy xs = do
 
 parse = parseTags . UB.toString . B.concat . LB.toChunks . responseBody
 
-bind :: Monad m => GenericBrowserAction m (Response LB.ByteString) ->
-        ([Tag String] -> GenericBrowserAction m (Response LB.ByteString)) ->
-        GenericBrowserAction m (Response LB.ByteString)
-bind req1 req2 = do
-  r1 <- req1
-  req2 $ parse r1
-
-
 -- The web request to log in to a service
-connect :: Request m -> String -> String -> Request (ResourceT IO)
-connect req login pass =
-  urlEncodedBody [ (UB.fromString "p1", UB.fromString login)
+connect :: String -> String -> Request (ResourceT IO)
+connect login pass =
+  let req = fromJust . parseUrl $
+            "http://www.kraland.org/main.php?p=8_1_1259_1&a=100"
+  in urlEncodedBody [ (UB.fromString "p1", UB.fromString login)
                  , (UB.fromString "p2", UB.fromString pass)
                  ] req
 
-select :: Request m -> [Tag String] -> Request (ResourceT IO)
-select req xs =
-  urlEncodedBody [ (UB.fromString "t", UB.fromString $ getToken xs)
+select :: String -> Request (ResourceT IO)
+select xs =
+  let req = fromJust . parseUrl $ "http://www.kraland.org/main.php?p=8_1_1259_1"
+  in urlEncodedBody [ (UB.fromString "t", UB.fromString xs)
                  , (UB.fromString "a", UB.fromString "1")
                  , (UB.fromString "p", UB.fromString "8_1_1259_1")
                  , (UB.fromString "p2", UB.fromString "50")
                  , (UB.fromString "p5", UB.fromString "1260")
                  ] req
 
+-- extractAllKramails goes throught all the pages
+extractAllKramails tdy 0    = return []
+extractAllKramails tdy page = do
+  url <- parseUrl $ "http://www.kraland.org/main.php?p=8_1_1259_1_" ++ show page
+  req <- makeRequestLbs url
+  rec <- extractAllKramails tdy (page - 1)
+  return $ (++) rec $ extractKramails tdy $ parse req
+
+-- this is the main script:
+--   starts by connecting to the interface
+--   then selects the right options to minimize the number of requests
+--   and finally pulls all the data available
+getAllKramails tdy = do
+  con <- makeRequestLbs $ connect "hahaha" "ouécéça"
+  sel <- makeRequestLbs $ select . getToken . parse $ con
+  extractAllKramails tdy . extractNumPages . parse $ sel
+
 main :: IO ()
 main = do
   man <- newManager def
-  urlcon <- parseUrl "http://www.kraland.org/main.php?p=8_1_1259_1&a=100"
-  urlsel <- parseUrl "http://www.kraland.org/main.php?p=8_1_1259_1"
-  sel <- return $
-    bind (makeRequestLbs $ connect urlcon "username" "password")
-         (makeRequestLbs . (select urlsel))
-  out <- runResourceT $ browse man sel
   tdy <- DTC.getCurrentTime
+  query <- return $ getAllKramails tdy
+  kramails <- runResourceT $ browse man query
 --  putStrLn . UB.toString . B.concat . LB.toChunks . responseBody $ out
-  kramails <- return $ extractKramails tdy $ parse out
-  mapM_ (measure kramails tdy) [(-2)..0]
+--  flip mapM_ kramails $ putStrLn . show
+  mapM_ (putStr . measure kramails tdy) (reverse [(-2)..0])
   where
-    measure kr tdy d = do
-      () <- putStrLn $ (++) "Modérés: " $ show . length $
-        filter (modere $ shiftDay d tdy) $ kr
-      putStrLn $ (++) "Détruits: " $ show . length $
-        filter (detruit $ shiftDay d tdy) $ kr
+    measure kr tdy d =
+      concat [ DTC2.showGregorian $ DTC.utctDay $ shiftDay d tdy, ": ",
+               "Modérés: ",
+               show . length $ filter (modere $ shiftDay d tdy) $ kr, "; ",
+               "Détruits: ",
+               show . length $ filter (detruit $ shiftDay d tdy) $ kr, "\n" ]
     modere  tdy kr =
       title kr == "[Mod�ration] Message mod�r�" && sameDay tdy (date kr)
     detruit tdy kr =
