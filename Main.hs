@@ -16,6 +16,7 @@ import           Data.Time.Format
 import qualified Data.Time.Clock         as DTC
 import qualified Data.Time.Calendar      as DTC2
 
+import Control.Monad
 import           System.Locale
 import           Data.Maybe
 import           Data.List
@@ -113,12 +114,13 @@ select xs =
                  ] req
 
 -- extractAllKramails goes throught all the pages
-extractAllKramails tdy 0    = return []
-extractAllKramails tdy page = do
+extractAllKramails :: DTC.UTCTime -> Int ->
+                      GenericBrowserAction (ResourceT IO) ([Kramail String])
+extractAllKramails tdy n =
+  fmap concat $ forM [1..n] $ \ page -> do
   url <- parseUrl $ "http://www.kraland.org/main.php?p=8_1_1259_1_" ++ show page
   req <- makeRequestLbs url
-  rec <- extractAllKramails tdy (page - 1)
-  return $ (++) rec $ extractKramails tdy $ parse req
+  return $ extractKramails tdy $ parse req
 
 -- this is the main script:
 --   starts by connecting to the interface
