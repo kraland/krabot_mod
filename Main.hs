@@ -140,12 +140,13 @@ main = do
   mapM_ (putStr . measure kramails tdy) (reverse [(-7)..0])
   where
     measure kr tdy d =
-      concat [ DTC2.showGregorian $ DTC.utctDay $ shiftDay d tdy, ": ",
-               "Modérés: ",
-               show . length $ filter (modere $ shiftDay d tdy) $ kr, "; ",
-               "Détruits: ",
-               show . length $ filter (detruit $ shiftDay d tdy) $ kr, "\n" ]
-    modere  tdy kr =
-      title kr == "[Modération] Message modéré" && sameDay tdy (date kr)
-    detruit tdy kr =
-      title kr == "[Modération] Message détruit" && sameDay tdy (date kr)
+      let thatDay           = shiftDay d tdy
+          criterion crit kr = title kr == crit && sameDay thatDay (date kr)
+          printEmAll crit   = show . length . filter (criterion crit) in
+      concat
+        [ DTC2.showGregorian $ DTC.utctDay $ thatDay, ": "
+        , "Modérés: "  , printEmAll "[Modération] Message modéré"   kr, "; "
+        , "Détruits: " , printEmAll "[Modération] Message détruit"  kr, "; "
+        , "Restaurés: ", printEmAll "[Modération] Message restauré" kr, "; "
+        , "Déplacés: " , printEmAll "[Modération] Sujet déplacé"    kr
+        , "\n" ]
