@@ -1,23 +1,35 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 module Main where
 
-import qualified Data.ByteString      as B
-import qualified Data.ByteString.Lazy as LB
-import qualified Data.ByteString.UTF8 as UB
-import qualified Data.Time.Clock      as DTC
-import qualified Data.Time.Calendar   as DTC2
-import           System.Locale
+-- import qualified Data.ByteString      as B
+-- import qualified Data.ByteString.Lazy    as LB
+import qualified Data.ByteString.UTF8          as UB
+import qualified Data.ByteString.Lazy.Internal as LBI
+-- Data.Text.Lazy
+import qualified Data.Text.Lazy          as TL
+import qualified Data.Text.Lazy.Encoding as TLE
+-- Data.Text
+import qualified Data.Text.Encoding      as TE
+-- Data.Time
 import           Data.Time.Format
+import qualified Data.Time.Clock         as DTC
+import qualified Data.Time.Calendar      as DTC2
+
+import           System.Locale
 import           Data.Maybe
+import           Data.List
 import           Data.List.Utils
 import           Data.Conduit
 import           Network.HTTP.Conduit
 import           Network.HTTP.Conduit.Browser
+import           Text.StringLike
 import           Text.HTML.TagSoup
 
-import System.IO.Unsafe
-
-getToken :: [Tag String] -> String
-getToken xs = fromAttrib "value" $ head $ dropWhile (~/= "<input name=t>") xs
+getToken :: (Show str, Eq str, StringLike str) => [Tag str] -> str
+getToken xs =
+  fromAttrib value . head $ dropWhile (~/= ("<input name=t>" :: String)) xs
+  where value = fromString ("value" :: String)
 
 sameDay :: DTC.UTCTime -> DTC.UTCTime -> Bool
 sameDay d1 d2 =
@@ -27,62 +39,68 @@ sameDay d1 d2 =
 shiftDay :: Integer -> DTC.UTCTime -> DTC.UTCTime
 shiftDay diff day = day { DTC.utctDay = DTC2.addDays diff $ DTC.utctDay day }
 
-data Kramail = Kramail
-  {  title  :: String
-  ,  target :: String
+data Kramail str = Kramail
+  {  title  :: str
+  ,  target :: str
   ,  date   :: DTC.UTCTime }
 
-instance Show Kramail where
+instance StringLike str => Show (Kramail str) where
   show kr =
-    title kr ++
-    "\nsent to: " ++ target kr ++
+    (toString $ title kr) ++
+    "\nsent to: " ++ (toString $ target kr) ++
     " on " ++ show (date kr) ++
     "\n\n"
 
-extractDate :: DTC.UTCTime -> String -> DTC.UTCTime
+extractDate :: StringLike str => DTC.UTCTime -> str -> DTC.UTCTime
 extractDate tdy str =
   let loc = defaultTimeLocale
       fmt = formatTime loc "%d/%m"
       rel = flip shiftDay tdy
       str' = replace "Aujourd'hui" (fmt tdy) $
              replace "Hier"        (fmt $ rel (-1)) $
-             replace "Avant-Hier"  (fmt $ rel (-2)) str
+             replace "Avant-Hier"  (fmt $ rel (-2)) $ toString str
   in readTime loc "%Y/%d/%m (%R)" $ "2013/" ++ str'
 
-extractNumPages :: [Tag String] -> Int
+extractNumPages :: (StringLike str, Show str) => [Tag str] -> Int
 extractNumPages =
-  read . fromTagText . head . filter isTagText .
-  last . sections (~== "<a>") .
-  takeWhile (~/= "<select>") .
-  dropWhile (~/= "<tr class=forum-c3>")
+  read . toString . fromTagText . head . filter isTagText .
+  last . sections (~== ("<a>" :: String)) .
+  takeWhile (~/= ("<select>" :: String)) .
+  dropWhile (~/= ("<tr class=forum-c3>" :: String))
 
-extractKramails :: DTC.UTCTime -> [Tag String] -> [Kramail]
+extractKramails :: (Show str, StringLike str) =>
+                   DTC.UTCTime -> [Tag str] -> [Kramail str]
 extractKramails tdy xs =
-  let table = takeWhile (~/= "<td colspan=6>") $
-              dropWhile (~/= "<tr class=forum-c1>") xs
-      lines = map (takeWhile (~/= "</tr>")) $  sections (~== "<tr>") table
+  let table = takeWhile (~/= ("<td colspan=6>" :: String)) $
+              dropWhile (~/= ("<tr class=forum-c1>" :: String)) xs
+      lines = map (takeWhile (~/= ("</tr>" :: String))) $
+              sections (~== ("<tr>" :: String)) table
   in catMaybes $ map (extractKramail tdy) $ init . init $ lines
 
-extractKramail :: DTC.UTCTime -> [Tag String] -> Maybe Kramail
+extractKramail :: (Show str, StringLike str) => DTC.UTCTime -> [Tag str] ->
+                  Maybe (Kramail str)
 extractKramail tdy xs = do
-  xxs <- return $ sections (~== "<td>") $ iterate tail xs !! 8
-  fields <- return $ map (takeWhile (~/= "</td>")) xxs
+  let xxs    = sections (~== ("<td>" :: String)) $ iterate tail xs !! 8
+      fields = map (takeWhile (~/= ("</td>" :: String))) xxs
   (obj : trg : prd : _) <- return $ map f fields
   return $ Kramail { title  = obj,
                      target = trg,
                      date   = extractDate tdy prd}
-  where f = (concatMap fromTagText) . (filter isTagText)
+  where f = strConcat . map fromTagText . (filter isTagText)
 
-parse = parseTags . UB.toString . B.concat . LB.toChunks . responseBody
+parse :: Response LBI.ByteString -> [Tag String]
+-- beware: TL.unpack is O(n) ; it is maybe possible to do better?
+parse = parseTags . TL.unpack . TLE.decodeLatin1 . responseBody
 
 -- The web request to log in to a service
-connect :: String -> String -> Request (ResourceT IO)
+connect :: StringLike str => str -> str -> Request (ResourceT IO)
 connect login pass =
   let req = fromJust . parseUrl $
             "http://www.kraland.org/main.php?p=8_1_1259_1&a=100"
-  in urlEncodedBody [ (UB.fromString "p1", UB.fromString login)
-                 , (UB.fromString "p2", UB.fromString pass)
-                 ] req
+  in  urlEncodedBody
+        [ (UB.fromString "p1", UB.fromString . castString $ login)
+        , (UB.fromString "p2", UB.fromString . castString $ pass) ]
+      req
 
 select :: String -> Request (ResourceT IO)
 select xs =
@@ -107,7 +125,7 @@ extractAllKramails tdy page = do
 --   then selects the right options to minimize the number of requests
 --   and finally pulls all the data available
 getAllKramails tdy = do
-  con <- makeRequestLbs $ connect "hahaha" "ouécéça"
+  con <- makeRequestLbs $ connect ("hahaha"  :: String) ("ouécéça" :: String)
   sel <- makeRequestLbs $ select . getToken . parse $ con
   extractAllKramails tdy . extractNumPages . parse $ sel
 
@@ -119,7 +137,7 @@ main = do
   kramails <- runResourceT $ browse man query
 --  putStrLn . UB.toString . B.concat . LB.toChunks . responseBody $ out
 --  flip mapM_ kramails $ putStrLn . show
-  mapM_ (putStr . measure kramails tdy) (reverse [(-2)..0])
+  mapM_ (putStr . measure kramails tdy) (reverse [(-7)..0])
   where
     measure kr tdy d =
       concat [ DTC2.showGregorian $ DTC.utctDay $ shiftDay d tdy, ": ",
@@ -128,6 +146,6 @@ main = do
                "Détruits: ",
                show . length $ filter (detruit $ shiftDay d tdy) $ kr, "\n" ]
     modere  tdy kr =
-      title kr == "[Mod�ration] Message mod�r�" && sameDay tdy (date kr)
+      title kr == "[Modération] Message modéré" && sameDay tdy (date kr)
     detruit tdy kr =
-      title kr == "[Mod�ration] Message d�truit" && sameDay tdy (date kr)
+      title kr == "[Modération] Message détruit" && sameDay tdy (date kr)
